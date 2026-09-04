@@ -153,14 +153,31 @@ export async function me(req, res) {
 }
 
 /**
- * Update profile (name, status, avatar url, profilePic url).
+ * Update profile (name, status, customId/username, avatar url, profilePic url).
  */
 export async function updateProfile(req, res) {
-  const { name, status, avatar, profilePic } = req.body;
+  const { name, status, customId, avatar, profilePic } = req.body;
   try {
     const update = {};
     if (name !== undefined) update.name = name;
     if (status !== undefined) update.status = status;
+
+    // Username (customId) — editable with uniqueness check.
+    if (customId !== undefined && String(customId).trim() !== req.user.customId) {
+      const newId = String(customId).trim().toLowerCase();
+      if (newId.length < 3) {
+        return res.status(400).json({ success: false, error: 'ID Pengguna minimal 3 karakter' });
+      }
+      if (!/^[a-zA-Z0-9_.-]+$/.test(newId)) {
+        return res.status(400).json({ success: false, error: 'ID hanya huruf, angka, titik, _, -' });
+      }
+      const taken = await User.findOne({ customId: newId });
+      if (taken) {
+        return res.status(409).json({ success: false, error: 'customId_taken', message: 'Username/ID Pengguna sudah digunakan.' });
+      }
+      update.customId = newId;
+    }
+
     if (avatar !== undefined) update.avatar = avatar;
     // Keep avatar + profilePic in sync when updating either.
     if (profilePic !== undefined) {

@@ -53,18 +53,117 @@ export async function getConversation(req, res) {
 
 /**
  * List all conversations (threads) for current user.
+ * Pinned conversations sort first; each item carries the peer, last message
+ * preview, unread count, and a pin flag for building a WhatsApp-style chat list.
  */
 export async function listConversations(req, res) {
   try {
     const myId = req.user._id;
+    const myIdStr = myId.toString();
+
     const convs = await Conversation.find({ participants: myId })
-      .sort({ updatedAt: -1 })
-      .populate('participants', 'name email customId avatar status isOnline')
+      .populate('participants', 'name email customId avatar profilePic status isOnline')
       .populate('lastMessage');
 
-    return res.status(200).json({ success: true, conversations: convs });
+    // Sort: pinned first, then by latest activity (fall back to updatedAt).
+    const enriched = convs
+      .map((c) => {
+        const peer = (c.participants || []).find(
+          (p) => p && p._id && p._id.toString() !== myIdStr
+        );
+        const self =
+          (c.participants || []).find((p) => p && p._id && p._id.toString() === myIdStr) ||
+          null;
+        const unread = c.unreadCounts ? c.unreadCounts.get(myIdStr) || 0 : 0;
+        return {
+          id: c._id.toString(),
+          updatedAt: c.updatedAt,
+          lastMessageTime: (c.participants?.length === 1
+            ? c.lastMessage?.createdAt
+            : null) ?? c.lastMessage?.createdAt ?? c.updatedAt,
+          pinned: Array.isArray(c.pinnedBy) && c.pinnedBy.some((x) => x.toString() === myIdStr),
+          unread: unread > 0 ? unread : 0,
+          lastMessagePreview: c.lastMessagePreview,
+          lastMessageType: c.lastMessage?.type || null,
+          lastMessageSenderId: c.lastMessage?.sender?.toString() || null,
+          peer: peer
+            ? {
+                id: peer._id.toString(),
+                name: peer.name,
+                email: peer.email,
+                customId: peer.customId,
+                avatar: peer.profilePic || peer.avatar,
+                status: peer.status,
+                isOnline: peer.isOnline,
+              }
+            : null,
+          self: self
+            ? {
+                id: self._id.toString(),
+                name: self.name,
+                customId: self.customId,
+                avatar: self.profilePic || self.avatar,
+              }
+            : null,
+        };
+      })
+      .sort((a, b) => {
+        if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+        return new Date(b.lastMessageTime) - new Date(a.lastMessageTime);
+      });
+
+    return res.status(200).json({ success: true, conversations: enriched });
   } catch (err) {
     console.error('[listConversations]', err);
+    return res.status(500).json({ success: false, error: 'Terjadi kesalahan server' });
+  }
+}
+
+/**
+ * Pin / unpin a conversation for the current user.
+ * body: { pinned: boolean }
+ */
+export async function pinConversation(req, res) {
+  const { conversationId } = req.params;
+  const { pinned } = req.body;
+  try {
+    const myId = req.user._id;
+    const conv = await Conversation.findOne({ _id: conversationId, participants: myId });
+    if (!conv) {
+      return res.status(404).json({ success: false, error: 'Percakapan tidak ditemukan' });
+    }
+    if (pinned) {
+      if (!conv.pinnedBy.some((x) => x.toString() === myId.toString())) {
+        conv.pinnedBy.push(myId);
+      }
+    } else {
+      conv.pinnedBy = conv.pinnedBy.filter((x) => x.toString() !== myId.toString());
+    }
+    await conv.save();
+    return res.status(200).json({ success: true, pinned: !!pinned, conversationId });
+  } catch (err) {
+    console.error('[pinConversation]', err);
+    return res.status(500).json({ success: false, error: 'Terjadi kesalahan server' });
+  }
+}
+
+/**
+ * Delete a chat (conversation + its messages) for the current user.
+ * Simple DM semantics: removes the thread and all its messages for both sides.
+ */
+export async function deleteConversation(req, res) {
+  const { conversationId } = req.params;
+  try {
+    const myId = req.user._id;
+    const conv = await Conversation.findOne({ _id: conversationId, participants: myId });
+    if (!conv) {
+      return res.status(404).json({ success: false, error: 'Percakapan tidak ditemukan' });
+    }
+    await Message.deleteMany({ conversationId: conv._id });
+    await Conversation.deleteOne({ _id: conv._id });
+    return res.status(200).json({ success: true, conversationId });
+  } catch (err) {
+    console.error('[deleteConversation]', err);
     return res.status(500).json({ success: false, error: 'Terjadi kesalahan server' });
   }
 }

@@ -11,15 +11,22 @@ import config from '../config/index.js';
 const storage = multer.memoryStorage();
 
 const fileFilter = (req, file, cb) => {
-  const allowedImages = /jpeg|jpg|png|gif|webp|heic/;
+  const allowedImages = /jpeg|jpg|png|gif|webp|heic|octet-stream|image\//;
   const allowedVideo = /mp4|mov|webm|mkv/;
   const allowedAudio = /mp3|m4a|aac|ogg/;
 
   const ext = path.extname(file.originalname).toLowerCase();
+  const mime = (file.mimetype || '').toLowerCase();
+
   const ok =
-    allowedImages.test(file.mimetype) ||
-    allowedVideo.test(file.mimetype) ||
-    allowedAudio.test(file.mimetype);
+    allowedImages.test(mime) ||
+    allowedVideo.test(mime) ||
+    allowedAudio.test(mime) ||
+    // Clients (e.g. Flutter MultipartFile without explicit contentType) often
+    // send `application/octet-stream`; the actual format is validated later by
+    // sharp during processing, so accept it and let the controller reject
+    // genuinely-invalid bytes.
+    (mime === 'application/octet-stream' && /\.(jpe?g|png|gif|webp|heic)$/i.test(ext));
 
   if (ok) return cb(null, true);
   return cb(new Error('Tipe file tidak didukung'));
