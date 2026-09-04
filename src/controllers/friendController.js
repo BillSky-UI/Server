@@ -2,50 +2,57 @@ import User from '../models/User.js';
 import { validationResult } from 'express-validator';
 
 /**
- * Search users by customId (partial match), returns matches excluding self.
+ * Search users by customId / name (prefix match), returns matches excluding self.
+ *
+ * Search is anchored to a PREFIX match (^q) which can use the unique `customId`
+ * / `name` indexes, and guarded with `maxTimeMS` so a slow query fails fast
+ * with a clear message instead of timing out silently on serverless hosts.
  */
 export async function searchUsers(req, res) {
-  const { q } = req.query;
-  if (!q || q.trim().length < 1) {
-    return res.status(400).json({ success: false, error: 'Masukkan kata kunci pencarian' });
+  const raw = (req.query.q || '').toString().trim();
+  if (!raw) {
+    return res.status(400).json({ success: false, error: 'Masukkan kata kunci pencarian.' });
   }
 
+  const escaped = raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
   try {
-    const regex = new RegExp(q.trim(), 'i');
+    const me = await User.findById(req.user._id);
+
     const users = await User.find({
-      $or: [
-        { customId: regex },
-        { name: regex },
-        { email: regex },
-      ],
       _id: { $ne: req.user._id },
+      $or: [
+        { customId: new RegExp(`^${escaped}`, 'i') },
+        { name: new RegExp(`^${escaped}`, 'i') },
+      ],
     })
       .limit(50)
+      .maxTimeMS(8000)
       .select('name email customId avatar profilePic status isOnline lastSeen');
 
-    // Annotate relationship status (friend / pending / none)
-    const me = await User.findById(req.user._id)
-      .populate('friends friendRequestsSent friendRequestsReceived');
-
-    const meIds = {
-      friendIds: new Set(me.friends.map((f) => f._id.toString())),
-      sentIds: new Set(me.friendRequestsSent.map((f) => f._id.toString())),
-      receivedIds: new Set(me.friendRequestsReceived.map((f) => f._id.toString())),
-    };
+    // Annotate relationship status (friend / pending / none) using the arrays
+    // we already fetched with `me` — no extra populate round-trip needed.
+    const friendIds = new Set((me.friends || []).map((f) => f.toString()));
+    const sentIds = new Set((me.friendRequestsSent || []).map((f) => f.toString()));
+    const receivedIds = new Set((me.friendRequestsReceived || []).map((f) => f.toString()));
 
     const result = users.map((u) => {
       const s = u._id.toString();
       let relationship = 'none';
-      if (meIds.friendIds.has(s)) relationship = 'friend';
-      else if (meIds.receivedIds.has(s)) relationship = 'pending_incoming';
-      else if (meIds.sentIds.has(s)) relationship = 'pending_outgoing';
+      if (friendIds.has(s)) relationship = 'friend';
+      else if (receivedIds.has(s)) relationship = 'pending_incoming';
+      else if (sentIds.has(s)) relationship = 'pending_outgoing';
       return { ...u.toObject(), relationship };
     });
 
     return res.status(200).json({ success: true, users: result });
   } catch (err) {
     console.error('[searchUsers]', err);
-    return res.status(500).json({ success: false, error: 'Terjadi kesalahan server' });
+    const msg =
+      err && err.name === 'MongooseError' && /timed out|timeout/i.test(err.message)
+        ? 'Pencarian terlalu lama, coba persempit kata kunci.'
+        : 'Terjadi kesalahan server. Coba lagi.';
+    return res.status(500).json({ success: false, error: msg });
   }
 }
 
