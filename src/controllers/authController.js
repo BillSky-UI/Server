@@ -123,8 +123,16 @@ export async function login(req, res) {
       },
     });
   } catch (err) {
-    console.error('[login]', err);
-    return res.status(500).json({ success: false, error: 'Terjadi kesalahan server' });
+    // Detailed, traceable logging for Vercel/Render logs.
+    console.error('[login] ERROR:', err?.message || err);
+    console.error('[login] STACK:', err?.stack || '(no stack)');
+    return res.status(500).json({
+      success: false,
+      error: 'server_error',
+      message: process.env.NODE_ENV === 'production'
+        ? 'Terjadi kesalahan server. Coba lagi.'
+        : `Terjadi kesalahan server: ${err?.message || err}`,
+    });
   }
 }
 
