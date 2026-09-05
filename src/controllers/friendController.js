@@ -6,9 +6,13 @@ import { validationResult } from 'express-validator';
 /**
  * Search users by customId / name (prefix match), returns matches excluding self.
  *
- * Search is anchored to a PREFIX match (^q) which can use the unique `customId`
- * / `name` indexes, and guarded with `maxTimeMS` so a slow query fails fast
- * with a clear message instead of timing out silently on serverless hosts.
+ * Designed to be RELIABLE on serverless hosts (Vercel) and large collections:
+ *  - Public ID is stored LOWERCASE, so a case-SENSITIVE anchored regex on the
+ *    lowercased input CAN use the unique `customId` index (fast, no scan).
+ *  - The `$or` full-collection scan is avoided (that was what made even a
+ *    valid ID fail — the query timed out and the request was aborted).
+ *  - A slow name query only degrades gracefully (best-effort, never fatal).
+ *  - Each branch is guarded with `maxTimeMS`.
  */
 export async function searchUsers(req, res) {
   const raw = (req.query.q || '').toString().trim();
@@ -16,24 +20,57 @@ export async function searchUsers(req, res) {
     return res.status(400).json({ success: false, error: 'Masukkan kata kunci pencarian.' });
   }
 
-  const escaped = raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escaped = escapeRegex(raw);
+  const lowerEscaped = escapeRegex(raw.toLowerCase());
 
   try {
     const me = await User.findById(req.user._id);
+    const select = 'name email customId avatar profilePic status isOnline lastSeen';
 
-    const users = await User.find({
-      _id: { $ne: req.user._id },
-      $or: [
-        { customId: new RegExp(`^${escaped}`, 'i') },
-        { name: new RegExp(`^${escaped}`, 'i') },
-      ],
-    })
-      .limit(50)
-      .maxTimeMS(8000)
-      .select('name email customId avatar profilePic status isOnline lastSeen');
+    // (1) Indexed prefix lookup on public ID (the common path for "add by ID").
+    let byId = [];
+    try {
+      byId = await User.find({
+        customId: new RegExp(`^${lowerEscaped}`),
+        _id: { $ne: req.user._id },
+      })
+        .limit(50)
+        .maxTimeMS(5000)
+        .select(select)
+        .exec();
+    } catch (e) {
+      console.warn('[searchUsers] id query failed, continuing:', e.message);
+    }
 
-    // Annotate relationship status (friend / pending / none) using the arrays
-    // we already fetched with `me` — no extra populate round-trip needed.
+    // (2) Best-effort prefix search on name. A timeout here only drops the
+    //     name matches — it never fails a request for a valid ID.
+    let byName = [];
+    if (byId.length < 50) {
+      try {
+        byName = await User.find({
+          name: new RegExp(`^${escaped}`, 'i'),
+          _id: { $ne: req.user._id },
+        })
+          .limit(50 - byId.length)
+          .maxTimeMS(5000)
+          .select(select)
+          .exec();
+      } catch (e) {
+        console.warn('[searchUsers] name query timed out, returning ID-only:', e.message);
+      }
+    }
+
+    // Merge + dedupe (a user can match both the ID and name branches).
+    const seen = new Set();
+    const users = [...byId, ...byName].filter((u) => {
+      const key = u._id.toString();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    // Annotate relationship status using the arrays already fetched with `me`.
     const friendIds = new Set((me.friends || []).map((f) => f.toString()));
     const sentIds = new Set((me.friendRequestsSent || []).map((f) => f.toString()));
     const receivedIds = new Set((me.friendRequestsReceived || []).map((f) => f.toString()));
@@ -50,11 +87,7 @@ export async function searchUsers(req, res) {
     return res.status(200).json({ success: true, users: result });
   } catch (err) {
     console.error('[searchUsers]', err);
-    const msg =
-      err && err.name === 'MongooseError' && /timed out|timeout/i.test(err.message)
-        ? 'Pencarian terlalu lama, coba persempit kata kunci.'
-        : 'Terjadi kesalahan server. Coba lagi.';
-    return res.status(500).json({ success: false, error: msg });
+    return res.status(500).json({ success: false, error: 'Terjadi kesalahan server. Coba lagi.' });
   }
 }
 

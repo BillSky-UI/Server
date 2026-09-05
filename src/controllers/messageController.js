@@ -18,7 +18,9 @@ export async function getConversation(req, res) {
 
     const myId = req.user._id;
     // Ensure the peer is a friend before exposing history.
-    if (!myId.equals(peerId) && !req.user.friends.includes(peerId)) {
+    // `friends` holds ObjectIds while peerId is a string — compare string forms.
+    const isFriend = (req.user.friends || []).some((f) => f.toString() === peerId);
+    if (!myId.equals(peerId) && !isFriend) {
       return res.status(403).json({
         success: false,
         error: 'not_friend',

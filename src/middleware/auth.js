@@ -1,9 +1,13 @@
-import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
+import { verifyToken } from '../utils/jwt.js';
 
 /**
  * Protect routes — requires a valid Bearer token.
  * Attaches `req.user` with fresh data from the DB.
+ * NOTE: token verification must use the SAME secret as signing
+ * (`config.jwt.secret`); using process.env.JWT_SECRET directly here broke
+ * every protected route when that env var was unset (tokens were signed with
+ * the fallback secret but verified against `undefined` -> 401 on all calls).
  */
 export async function protect(req, res, next) {
   try {
@@ -18,7 +22,11 @@ export async function protect(req, res, next) {
       return res.status(401).json({ success: false, error: 'Tidak diautentikasi' });
     }
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = verifyToken(token);
+    if (!decoded || !decoded.id) {
+      return res.status(401).json({ success: false, error: 'Token tidak valid atau kedaluwarsa' });
+    }
+
     const user = await User.findById(decoded.id);
     if (!user) {
       return res.status(401).json({ success: false, error: 'Pengguna tidak ditemukan' });
@@ -43,11 +51,9 @@ export function optionalAuth(req, res, next) {
 
   if (!token) return next();
 
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+  const decoded = verifyToken(token);
+  if (decoded) {
     req.userId = decoded.id;
-  } catch {
-    // ignore invalid token
   }
   next();
 }

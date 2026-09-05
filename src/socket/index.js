@@ -170,7 +170,9 @@ async function handleSendMessage(io, socket, payload = {}, ack) {
     // Self-chat (testing) is always allowed even if not "friends" with yourself.
     if (toUserId !== socket.userId) {
       const sender = await User.findById(socket.userId).select('friends');
-      if (!sender.friends.includes(toUserId)) {
+      // `friends` holds ObjectIds while toUserId is a string — compare string forms.
+      const isFriend = (sender.friends || []).some((f) => f.toString() === toUserId);
+      if (!isFriend) {
         return ack?.({ ok: false, error: 'not_friend', message: 'Anda belum berteman dengan penerima' });
       }
     }
