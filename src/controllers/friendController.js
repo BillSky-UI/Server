@@ -62,6 +62,61 @@ function isValidObjectId(id) {
   return mongoose.Types.ObjectId.isValid(id);
 }
 
+/**
+ * Exact lookup of a user by their public ID (`customId`).
+ * Used by search UIs so a *truly missing* ID produces a clear 404
+ * (`user_not_found` -> "ID tidak ditemukan") instead of an empty 200 list.
+ *   - 400 : missing / blank customId
+ *   - 404 : user_not_found — no account with that customId
+ *   - 400 : cannot_add_self — the ID belongs to the caller
+ *   - 200 : { success, user } with relationship annotated
+ */
+export async function findUserByCustomId(req, res) {
+  const normalized = String(req.query.customId || '').trim().toLowerCase();
+  if (!normalized) {
+    return res.status(400).json({
+      success: false,
+      error: 'Masukkan ID Pengguna',
+      message: 'Masukkan ID Pengguna yang dicari.',
+    });
+  }
+
+  try {
+    const user = await User.findOne({ customId: normalized })
+      .maxTimeMS(8000)
+      .select('name email customId avatar profilePic status isOnline lastSeen');
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'user_not_found',
+        message: 'ID tidak ditemukan',
+      });
+    }
+    if (user._id.equals(req.user._id)) {
+      return res.status(400).json({
+        success: false,
+        error: 'cannot_add_self',
+        message: 'Itu adalah ID Anda sendiri.',
+      });
+    }
+
+    const me = await User.findById(req.user._id);
+    const s = user._id.toString();
+    let relationship = 'none';
+    if (includesId(me.friends, s)) relationship = 'friend';
+    else if (includesId(me.friendRequestsReceived, s)) relationship = 'pending_incoming';
+    else if (includesId(me.friendRequestsSent, s)) relationship = 'pending_outgoing';
+
+    return res.status(200).json({
+      success: true,
+      user: { ...user.toObject(), relationship },
+    });
+  } catch (err) {
+    console.error('[findUserByCustomId]', err);
+    return res.status(500).json({ success: false, error: 'Terjadi kesalahan server. Coba lagi.' });
+  }
+}
+
 function includesId(array, id) {
   if (!Array.isArray(array)) return false;
   const s = id.toString();

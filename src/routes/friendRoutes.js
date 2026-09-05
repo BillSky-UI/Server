@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { body } from 'express-validator';
 import {
   searchUsers,
+  findUserByCustomId,
   addFriend,
   acceptFriend,
   declineFriend,
@@ -18,8 +19,10 @@ router.use(protect);
 
 /**
  * GET /api/friends/search?q=...
+ * GET /api/friends/find?customId=...   -> exact lookup (404 when not found)
  */
 router.get('/search', searchUsers);
+router.get('/find', findUserByCustomId);
 
 /**
  * GET /api/friends                       -> list friends
