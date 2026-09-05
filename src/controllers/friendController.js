@@ -1,4 +1,6 @@
+import mongoose from 'mongoose';
 import User from '../models/User.js';
+import { notifyUser } from '../socket/index.js';
 import { validationResult } from 'express-validator';
 
 /**
@@ -56,8 +58,25 @@ export async function searchUsers(req, res) {
   }
 }
 
+function isValidObjectId(id) {
+  return mongoose.Types.ObjectId.isValid(id);
+}
+
+function includesId(array, id) {
+  if (!Array.isArray(array)) return false;
+  const s = id.toString();
+  return array.some((v) => v.toString() === s);
+}
+
 /**
- * Add a friend by exact customId — creates a received friend request on target.
+ * Send a friend request by exact customId.
+ *
+ * Flow:
+ *  - Already friends          -> 409 already_friend
+ *  - Request already sent     -> 409 request_pending
+ *  - Target already sent ME a request -> RECIPROCAL ACCEPT (we become friends at once)
+ *  - Otherwise                -> pending request is created on both sides and the
+ *                                target is notified in real time.
  */
 export async function addFriend(req, res) {
   const errors = validationResult(req);
@@ -90,44 +109,88 @@ export async function addFriend(req, res) {
       return res.status(400).json({
         success: false,
         error: 'cannot_add_self',
-        message: 'Anda tidak bisa menambahkan diri sendiri sebagai teman.',
+        message: 'Anda tidak bisa menambah diri sendiri sebagai teman.',
       });
     }
 
     const me = await User.findById(req.user._id);
+    const targetId = target._id;
 
-    if (me.friends.includes(target._id)) {
+    if (includesId(me.friends, targetId)) {
       return res.status(409).json({
         success: false,
         error: 'already_friend',
         message: `${target.name} sudah menjadi teman Anda.`,
       });
     }
-    if (me.friendRequestsSent.includes(target._id)) {
+    if (includesId(me.friendRequestsSent, targetId)) {
       return res.status(409).json({
         success: false,
         error: 'request_pending',
         message: 'Permintaan pertemanan sudah dikirim dan menunggu diterima.',
       });
     }
-    if (me.friendRequestsReceived.includes(target._id)) {
-      return res.status(409).json({
-        success: false,
-        error: 'already_received',
-        message: `${target.name} sudah mengirim permintaan pertemanan kepada Anda. Terima permintaan tersebut.`,
+
+    // Reciprocal: target already sent ME a request -> accept both ways at once.
+    if (includesId(me.friendRequestsReceived, targetId)) {
+      await Promise.all([
+        User.updateOne(
+          { _id: me._id },
+          { $pull: { friendRequestsReceived: targetId }, $addToSet: { friends: targetId } }
+        ),
+        User.updateOne(
+          { _id: targetId },
+          { $pull: { friendRequestsSent: me._id }, $addToSet: { friends: me._id } }
+        ),
+      ]);
+
+      // Let the original requester know their request was accepted.
+      notifyUser(targetId.toString(), 'friend:request:accepted', {
+        userId: me._id.toString(),
+        name: me.name,
+        customId: me.customId,
+        at: new Date().toISOString(),
+      });
+
+      return res.status(200).json({
+        success: true,
+        friend: true,
+        message: `Anda dan ${target.name} kini menjadi teman.`,
+        target: {
+          id: target._id,
+          name: target.name,
+          customId: target.customId,
+          avatar: target.avatar,
+          profilePic: target.profilePic,
+        },
       });
     }
 
-    // Add to each other's lists atomically.
+    // Create a pending request on both sides atomically.
     await Promise.all([
-      User.updateOne({ _id: me._id }, { $push: { friendRequestsSent: target._id } }),
-      User.updateOne({ _id: target._id }, { $push: { friendRequestsReceived: me._id } }),
+      User.updateOne({ _id: me._id }, { $addToSet: { friendRequestsSent: targetId } }),
+      User.updateOne({ _id: targetId }, { $addToSet: { friendRequestsReceived: me._id } }),
     ]);
+
+    // Notify target in real time (more reliable than relying only on the client emit).
+    notifyUser(targetId.toString(), 'friend:request:new', {
+      fromUserId: me._id.toString(),
+      name: me.name,
+      customId: me.customId,
+      at: new Date().toISOString(),
+    });
 
     return res.status(200).json({
       success: true,
+      friend: false,
       message: `Permintaan pertemanan terkirim ke ${target.name}.`,
-      target: { id: target._id, name: target.name, customId: target.customId, avatar: target.avatar, profilePic: target.profilePic },
+      target: {
+        id: target._id,
+        name: target.name,
+        customId: target.customId,
+        avatar: target.avatar,
+        profilePic: target.profilePic,
+      },
     });
   } catch (err) {
     console.error('[addFriend]', err);
@@ -136,14 +199,24 @@ export async function addFriend(req, res) {
 }
 
 /**
- * Accept an incoming friend request.
+ * Accept an incoming friend request. The requester's account is added to the
+ * receiver's friend list (and vice-versa) so both can chat immediately.
  */
 export async function acceptFriend(req, res) {
-  const { userId } = req.params; // the requester's ObjectId
+  const { userId } = req.params;
+  if (!isValidObjectId(userId)) {
+    return res.status(400).json({ success: false, error: 'ID pengguna tidak valid' });
+  }
+
   try {
     const me = await User.findById(req.user._id);
+    const requester = await User.findById(userId);
 
-    if (!me.friendRequestsReceived.includes(userId)) {
+    if (!requester) {
+      return res.status(404).json({ success: false, error: 'Pengguna tidak ditemukan' });
+    }
+
+    if (!includesId(me.friendRequestsReceived, userId)) {
       return res.status(400).json({
         success: false,
         error: 'no_request',
@@ -154,21 +227,25 @@ export async function acceptFriend(req, res) {
     await Promise.all([
       User.updateOne(
         { _id: me._id },
-        {
-          $pull: { friendRequestsReceived: userId },
-          $addToSet: { friends: userId },
-        }
+        { $pull: { friendRequestsReceived: userId }, $addToSet: { friends: userId } }
       ),
       User.updateOne(
         { _id: userId },
-        {
-          $pull: { friendRequestsSent: me._id },
-          $addToSet: { friends: me._id },
-        }
+        { $pull: { friendRequestsSent: me._id }, $addToSet: { friends: me._id } }
       ),
     ]);
 
-    const newFriend = await User.findById(userId).select('name email customId avatar profilePic status isOnline lastSeen');
+    const newFriend = await User.findById(userId).select(
+      'name email customId avatar profilePic status isOnline lastSeen'
+    );
+
+    // Notify the requester so they can update their UI / friend list in real time.
+    notifyUser(userId, 'friend:request:accepted', {
+      userId: me._id.toString(),
+      name: me.name,
+      customId: me.customId,
+      at: new Date().toISOString(),
+    });
 
     return res.status(200).json({
       success: true,
@@ -182,24 +259,73 @@ export async function acceptFriend(req, res) {
 }
 
 /**
- * Decline / remove an incoming friend request.
+ * Reject an incoming friend request — it is cancelled/removed from the pending list.
  */
 export async function declineFriend(req, res) {
   const { userId } = req.params;
+  if (!isValidObjectId(userId)) {
+    return res.status(400).json({ success: false, error: 'ID pengguna tidak valid' });
+  }
+
   try {
+    const me = await User.findById(req.user._id);
+    if (!includesId(me.friendRequestsReceived, userId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'no_request',
+        message: 'Tidak ada permintaan pertemanan dari pengguna tersebut.',
+      });
+    }
+
     await Promise.all([
-      User.updateOne(
-        { _id: req.user._id },
-        { $pull: { friendRequestsReceived: userId } }
-      ),
-      User.updateOne(
-        { _id: userId },
-        { $pull: { friendRequestsSent: req.user._id } }
-      ),
+      User.updateOne({ _id: req.user._id }, { $pull: { friendRequestsReceived: userId } }),
+      User.updateOne({ _id: userId }, { $pull: { friendRequestsSent: req.user._id } }),
     ]);
+
+    notifyUser(userId, 'friend:request:declined', {
+      userId: req.user._id.toString(),
+      at: new Date().toISOString(),
+    });
+
     return res.status(200).json({ success: true, message: 'Permintaan pertemanan ditolak.' });
   } catch (err) {
     console.error('[declineFriend]', err);
+    return res.status(500).json({ success: false, error: 'Terjadi kesalahan server' });
+  }
+}
+
+/**
+ * Cancel / withdraw a friend request I sent (removed from the pending list).
+ */
+export async function cancelFriendRequest(req, res) {
+  const { userId } = req.params;
+  if (!isValidObjectId(userId)) {
+    return res.status(400).json({ success: false, error: 'ID pengguna tidak valid' });
+  }
+
+  try {
+    const me = await User.findById(req.user._id);
+    if (!includesId(me.friendRequestsSent, userId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'no_request',
+        message: 'Tidak ada permintaan pertemanan yang dikirim ke pengguna tersebut.',
+      });
+    }
+
+    await Promise.all([
+      User.updateOne({ _id: req.user._id }, { $pull: { friendRequestsSent: userId } }),
+      User.updateOne({ _id: userId }, { $pull: { friendRequestsReceived: req.user._id } }),
+    ]);
+
+    notifyUser(userId, 'friend:request:cancelled', {
+      userId: req.user._id.toString(),
+      at: new Date().toISOString(),
+    });
+
+    return res.status(200).json({ success: true, message: 'Permintaan pertemanan dibatalkan.' });
+  } catch (err) {
+    console.error('[cancelFriendRequest]', err);
     return res.status(500).json({ success: false, error: 'Terjadi kesalahan server' });
   }
 }
@@ -209,6 +335,10 @@ export async function declineFriend(req, res) {
  */
 export async function removeFriend(req, res) {
   const { userId } = req.params;
+  if (!isValidObjectId(userId)) {
+    return res.status(400).json({ success: false, error: 'ID pengguna tidak valid' });
+  }
+
   try {
     await Promise.all([
       User.updateOne({ _id: req.user._id }, { $pull: { friends: userId } }),
@@ -236,17 +366,20 @@ export async function listFriends(req, res) {
 }
 
 /**
- * List all pending friend requests (received + sent).
+ * List all pending friend requests (received + sent), newest first.
  */
 export async function listRequests(req, res) {
   try {
     const me = await User.findById(req.user._id)
       .populate('friendRequestsReceived', 'name email customId avatar profilePic status')
       .populate('friendRequestsSent', 'name email customId avatar profilePic status');
+
+    const byNewest = (a, b) => String(b._id).localeCompare(String(a._id));
+
     return res.status(200).json({
       success: true,
-      received: me.friendRequestsReceived,
-      sent: me.friendRequestsSent,
+      received: (me.friendRequestsReceived || []).slice().sort(byNewest),
+      sent: (me.friendRequestsSent || []).slice().sort(byNewest),
     });
   } catch (err) {
     console.error('[listRequests]', err);

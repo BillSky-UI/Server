@@ -11,11 +11,14 @@ const onlineUsers = new Map(); // userId -> Set<socketId>
 const peerSessions = new Map(); // socketId -> userId
 const socketToUserId = new Map(); // socketId -> userId
 
+let ioRef = null;
+
 /**
  * Initializes all Socket.io real-time handlers.
  * @param {Server} io Socket.IO server instance
  */
 export function initSocket(io) {
+  ioRef = io;
   io.use((socket, next) => {
     try {
       const token = socket.handshake.auth?.token;
@@ -101,6 +104,15 @@ function emitToUser(io, userId, event, data) {
   ids.forEach((sid) => {
     io.to(sid).emit(event, data);
   });
+}
+
+/**
+ * Emit `event` to all sockets of `userId` (uses the module-level io ref).
+ * Safe no-op when io isn't initialized (e.g. unit tests / cold start).
+ */
+export function notifyUser(userId, event, data) {
+  if (!ioRef) return;
+  emitToUser(ioRef, userId, event, data);
 }
 
 function relayToUser(io, socket, data = {}, event) {

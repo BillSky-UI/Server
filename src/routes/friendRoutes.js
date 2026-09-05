@@ -5,6 +5,7 @@ import {
   addFriend,
   acceptFriend,
   declineFriend,
+  cancelFriendRequest,
   removeFriend,
   listFriends,
   listRequests,
@@ -39,10 +40,12 @@ router.post(
 /**
  * POST /api/friends/:userId/accept
  * POST /api/friends/:userId/decline
+ * POST /api/friends/:userId/cancel      -> withdraw a sent request
  * DELETE /api/friends/:userId
  */
 router.post('/:userId/accept', acceptFriend);
 router.post('/:userId/decline', declineFriend);
+router.post('/:userId/cancel', cancelFriendRequest);
 router.delete('/:userId', removeFriend);
 
 export default router;
