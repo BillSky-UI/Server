@@ -70,33 +70,42 @@ export async function listConversations(req, res) {
     // Sort: pinned first, then by latest activity (fall back to updatedAt).
     const enriched = convs
       .map((c) => {
-        const peer = (c.participants || []).find(
-          (p) => p && p._id && p._id.toString() !== myIdStr
-        );
+        const myIdStrB = myIdStr;
+        const peer =
+          (c.participants || []).find(
+            (p) => p && p._id && p._id.toString() !== myIdStrB
+          ) || null;
         const self =
-          (c.participants || []).find((p) => p && p._id && p._id.toString() === myIdStr) ||
+          (c.participants || []).find((p) => p && p._id && p._id.toString() === myIdStrB) ||
           null;
+        // Self-chat: participants are [me, me], so there is no "other" user.
+        // Fall back to "self" so the chat list still shows *a* contact (yourself)
+        // and can open the self-chat history screen.
+        const displayPeer = peer || self;
+        const isSelfChat = peer == null;
         const unread = c.unreadCounts ? c.unreadCounts.get(myIdStr) || 0 : 0;
         return {
           id: c._id.toString(),
           updatedAt: c.updatedAt,
-          lastMessageTime: (c.participants?.length === 1
-            ? c.lastMessage?.createdAt
-            : null) ?? c.lastMessage?.createdAt ?? c.updatedAt,
+          lastMessageTime: c.lastMessage?.createdAt ?? c.updatedAt,
           pinned: Array.isArray(c.pinnedBy) && c.pinnedBy.some((x) => x.toString() === myIdStr),
           unread: unread > 0 ? unread : 0,
-          lastMessagePreview: c.lastMessagePreview,
+          isSelfChat,
+          // Full encrypted payload of the last message so clients can decrypt
+          // and render a real WhatsApp-style preview (never store plaintext).
+          lastMessageEncryptedText: c.lastMessage?.encryptedText ?? null,
+          lastMessageIv: c.lastMessage?.iv ?? null,
           lastMessageType: c.lastMessage?.type || null,
           lastMessageSenderId: c.lastMessage?.sender?.toString() || null,
-          peer: peer
+          peer: displayPeer
             ? {
-                id: peer._id.toString(),
-                name: peer.name,
-                email: peer.email,
-                customId: peer.customId,
-                avatar: peer.profilePic || peer.avatar,
-                status: peer.status,
-                isOnline: peer.isOnline,
+                id: displayPeer._id.toString(),
+                name: displayPeer.name,
+                email: displayPeer.email,
+                customId: displayPeer.customId,
+                avatar: displayPeer.profilePic || displayPeer.avatar,
+                status: displayPeer.status,
+                isOnline: displayPeer.isOnline,
               }
             : null,
           self: self
@@ -190,6 +199,105 @@ export async function markRead(req, res) {
     return res.status(200).json({ success: true });
   } catch (err) {
     console.error('[markRead]', err);
+    return res.status(500).json({ success: false, error: 'Terjadi kesalahan server' });
+  }
+}
+
+/**
+ * Send a message over plain HTTP.
+ *
+ * This is the REST twin of the Socket.io `message:send` handler. It exists so
+ * the app still works on serverless hosts (e.g. Vercel) where a persistent
+ * WebSocket connection cannot be kept alive: clients POST the (already
+ * client-side encrypted) payload, the server persists it and updates the
+ * conversation's last-message preview + unread counter, exactly like the
+ * socket path. If the receiver has a live socket it is still notified in real
+ * time via `emitToUser`.
+ */
+export async function sendMessage(req, res) {
+  const { toUserId, encryptedText, iv, type = 'text', media = null, clientMessageId = null } =
+    req.body || {};
+
+  try {
+    if (!toUserId) {
+      return res.status(400).json({ success: false, error: 'receiver_missing' });
+    }
+    if (type === 'text' && !encryptedText) {
+      return res.status(400).json({ success: false, error: 'empty_text' });
+    }
+    if (type !== 'text' && !media?.url) {
+      return res.status(400).json({ success: false, error: 'media_missing' });
+    }
+
+    const senderId = req.user._id;
+    if (toUserId !== senderId.toString()) {
+      // Friendship check (same semantics as the socket handler).
+      const sender = await User.findById(senderId).select('friends');
+      const isFriend = (sender.friends || []).some((f) => f.toString() === toUserId);
+      if (!isFriend) {
+        return res.status(403).json({
+          success: false,
+          error: 'not_friend',
+          message: 'Anda belum berteman dengan penerima',
+        });
+      }
+    }
+
+    // Find-or-create conversation
+    const pair = [senderId, toUserId].sort();
+    let conv = await Conversation.findOne({ participants: { $all: pair } });
+    if (!conv) {
+      conv = await Conversation.create({ participants: pair });
+    }
+
+    const message = await Message.create({
+      sender: senderId,
+      receiver: toUserId,
+      conversationId: conv._id,
+      encryptedText: type === 'text' ? encryptedText : null,
+      iv: type === 'text' ? iv : null,
+      type,
+      media: type !== 'text' ? media : null,
+      status: 'sent',
+    });
+
+    const convUpdate = {
+      $set: {
+        lastMessage: message._id,
+        lastMessagePreview: type === 'text' ? String(encryptedText).slice(0, 60) : `[${type}]`,
+      },
+    };
+    if (toUserId !== senderId.toString()) {
+      convUpdate.$inc = { [`unreadCounts.${toUserId}`]: 1 };
+    }
+    await Conversation.updateOne({ _id: conv._id }, convUpdate);
+
+    const msgData = {
+      id: message._id.toString(),
+      clientMessageId: clientMessageId || null,
+      fromUserId: senderId.toString(),
+      toUserId,
+      conversationId: conv._id.toString(),
+      encryptedText: message.encryptedText,
+      iv: message.iv,
+      type: message.type,
+      media: message.media,
+      timestamp: message.createdAt.toISOString(),
+      status: 'sent',
+    };
+
+    // Real-time relay when the receiver has a live socket (if any).
+    try {
+      const { notifyUser } = await import('../socket/index.js');
+      notifyUser(toUserId, 'message:new', msgData);
+    } catch (e) {
+      // socket bridge unavailable — the receiver will pick the message up via
+      // polling / next conversation refresh. Not fatal.
+    }
+
+    return res.status(200).json({ success: true, message: msgData });
+  } catch (err) {
+    console.error('[sendMessage]', err);
     return res.status(500).json({ success: false, error: 'Terjadi kesalahan server' });
   }
 }

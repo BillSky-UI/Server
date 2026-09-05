@@ -202,13 +202,18 @@ async function handleSendMessage(io, socket, payload = {}, ack) {
     });
 
     // Update conversation.lastMessage
-    await Conversation.updateOne(
-      { _id: conversationId },
-      {
-        $set: { lastMessage: message._id, lastMessagePreview: type === 'text' ? encryptedText.slice(0, 60) : `[${type}]` },
-        $inc: { [`unreadCounts.${toUserId}`]: 1 },
-      }
-    );
+    const convUpdate = {
+      $set: {
+        lastMessage: message._id,
+        lastMessagePreview: type === 'text' ? encryptedText.slice(0, 60) : `[${type}]`,
+      },
+    };
+    // Count unread ONLY for the receiver, never for yourself (self-chat).
+    // Otherwise messaging yourself would increment your own unread badge.
+    if (toUserId !== socket.userId) {
+      convUpdate.$inc = { [`unreadCounts.${toUserId}`]: 1 };
+    }
+    await Conversation.updateOne({ _id: conversationId }, convUpdate);
 
     const msgData = {
       id: message._id.toString(),
@@ -247,6 +252,8 @@ function handleDelivered(socket, payload = {}) {
 
 /**
  * 'message:read' — receiver marks message read + relays read receipt.
+ * Also zeroes the conversation's unread badge for the reading user so the
+ * WhatsApp-style chat list clears its red counter when the chat is opened.
  */
 async function handleRead(socket, payload = {}) {
   const { messageId, senderId } = payload;
@@ -256,6 +263,14 @@ async function handleRead(socket, payload = {}) {
       { _id: messageId, receiver: socket.userId },
       { status: 'read', readAt: new Date() }
     );
+    // Reset unread badge for the conversation this message belongs to.
+    const msg = await Message.findById(messageId).select('conversationId');
+    if (msg?.conversationId) {
+      await Conversation.updateOne(
+        { _id: msg.conversationId },
+        { $set: { [`unreadCounts.${socket.userId.toString()}`]: 0 } }
+      );
+    }
     if (senderId) {
       emitToUser(io, senderId, 'message:read-receipt', { messageId, readBy: socket.userId });
     }
