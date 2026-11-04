@@ -5,6 +5,10 @@ import {
   login,
   me,
   updateProfile,
+  requestRegisterOtp,
+  verifyRegisterOtp,
+  requestLoginOtp,
+  verifyLoginOtp,
 } from '../controllers/authController.js';
 import { protect } from '../middleware/auth.js';
 
@@ -31,7 +35,36 @@ router.post(
 );
 
 /**
- * POST /api/auth/login
+ * POST /api/auth/register/request-otp  -> kirim OTP pendaftaran ke WhatsApp
+ * POST /api/auth/register/verify-otp   -> verifikasi OTP + buat akun
+ */
+router.post(
+  '/register/request-otp',
+  [
+    body('name').trim().notEmpty().withMessage('Nama wajib diisi'),
+    body('phone').trim().notEmpty().withMessage('Nomor WhatsApp wajib diisi'),
+    body('customId')
+      .trim()
+      .isLength({ min: 3, max: 30 })
+      .withMessage('ID Pengguna harus 3-30 karakter'),
+  ],
+  requestRegisterOtp
+);
+router.post('/register/verify-otp', verifyRegisterOtp);
+
+/**
+ * POST /api/auth/login/request-otp  -> kirim OTP login ke WhatsApp
+ * POST /api/auth/login/verify-otp   -> verifikasi OTP + terbitkan token
+ */
+router.post(
+  '/login/request-otp',
+  [body('phone').trim().notEmpty().withMessage('Nomor WhatsApp wajib diisi')],
+  requestLoginOtp
+);
+router.post('/login/verify-otp', verifyLoginOtp);
+
+/**
+ * Legacy email + password login (kept for existing accounts).
  */
 router.post(
   '/login',

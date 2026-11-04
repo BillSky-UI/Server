@@ -244,11 +244,7 @@ export async function sendMessage(req, res) {
     }
 
     // Find-or-create conversation
-    const pair = [senderId, toUserId].sort();
-    let conv = await Conversation.findOne({ participants: { $all: pair } });
-    if (!conv) {
-      conv = await Conversation.create({ participants: pair });
-    }
+    const conv = await Conversation.findOrCreate(senderId, toUserId);
 
     const message = await Message.create({
       sender: senderId,

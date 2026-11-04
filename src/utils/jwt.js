@@ -12,7 +12,8 @@ export function signToken(user) {
   return jwt.sign(
     {
       id: user._id,
-      email: user.email,
+      email: user.email || null,
+      phone: user.phone || null,
       customId: user.customId,
     },
     config.jwt.secret,

@@ -13,6 +13,9 @@ const conversationSchema = new mongoose.Schema(
         required: true,
       },
     ],
+    pairKey: {
+      type: String,
+    },
     lastMessage: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Message',
@@ -42,22 +45,41 @@ const conversationSchema = new mongoose.Schema(
   }
 );
 
-// Ensure a conversation only exists once per user-pair.
-conversationSchema.index({ participants: 1 }, { unique: true });
+// A conversation is unique per user-pair. A unique index on the array field
+// itself (the old `participants: 1` index) incorrectly blocks a user from
+// having more than ONE conversation, so uniqueness is enforced by `pairKey`.
+conversationSchema.index({ pairKey: 1 }, { unique: true, sparse: true });
+conversationSchema.index({ participants: 1 });
 conversationSchema.index({ updatedAt: -1 });
+
+conversationSchema.statics.pairKeyFor = function (userIdA, userIdB) {
+  return [String(userIdA), String(userIdB)].sort().join(':');
+};
 
 /**
  * Static helper: find-or-create a conversation between two users.
  */
 conversationSchema.statics.findOrCreate = async function (userIdA, userIdB) {
-  const pair = [userIdA, userIdB].sort();
-  let conv = await this.findOne({ participants: { $all: pair } }).populate(
-    'participants',
-    'name email customId avatar isOnline'
-  );
+  const pair = [String(userIdA), String(userIdB)].sort();
+  const pairKey = pair.join(':');
+
+  let conv = await this.findOne({ participants: { $all: pair } });
   if (!conv) {
-    conv = await this.create({ participants: pair });
+    try {
+      conv = await this.create({ participants: pair, pairKey });
+    } catch (err) {
+      if (err.code === 11000) {
+        conv = await this.findOne({ pairKey });
+      } else {
+        throw err;
+      }
+    }
+  } else if (!conv.pairKey) {
+    conv.pairKey = pairKey;
+    await conv.save().catch(() => {});
   }
+
+  await conv.populate('participants', 'name email customId avatar isOnline');
   return conv;
 };
 

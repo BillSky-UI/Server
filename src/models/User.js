@@ -17,12 +17,25 @@ const userSchema = new mongoose.Schema(
     },
     email: {
       type: String,
-      required: [true, 'Email wajib diisi'],
+      required: false,
       unique: true,
+      sparse: true,
       lowercase: true,
       trim: true,
       index: true,
       match: [/^[^\s@]+@[^\s@]+\.[^\s@]+$/, 'Format email tidak valid'],
+    },
+    phone: {
+      type: String,
+      unique: true,
+      sparse: true,
+      trim: true,
+      index: true,
+      match: [/^\+[1-9]\d{7,14}$/, 'Format nomor telepon tidak valid'],
+    },
+    phoneVerified: {
+      type: Boolean,
+      default: false,
     },
     customId: {
       type: String,
@@ -40,7 +53,7 @@ const userSchema = new mongoose.Schema(
     },
     password: {
       type: String,
-      required: [true, 'Password wajib diisi'],
+      required: false,
       select: false, // never fetched by default
       minlength: [8, 'Password minimal 8 karakter'],
     },

@@ -178,16 +178,8 @@ async function handleSendMessage(io, socket, payload = {}, ack) {
     }
 
     // Find-or-create conversation
-    const conv = await Conversation.findOne({
-      participants: { $all: [socket.userId, toUserId].sort() },
-    });
-    let conversationId = conv?._id;
-    if (!conv) {
-      const created = await Conversation.create({
-        participants: [socket.userId, toUserId].sort(),
-      });
-      conversationId = created._id;
-    }
+    const conv = await Conversation.findOrCreate(socket.userId, toUserId);
+    const conversationId = conv._id;
 
     // Build & persist message
     const message = await Message.create({

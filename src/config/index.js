@@ -44,6 +44,30 @@ const config = {
     max: 300,
   },
 
+  otp: {
+    length: parseInt(process.env.OTP_LENGTH || '6', 10),
+    ttlSeconds: parseInt(process.env.OTP_TTL_SECONDS || '300', 10),
+    cooldownSeconds: parseInt(process.env.OTP_COOLDOWN_SECONDS || '60', 10),
+    maxAttempts: parseInt(process.env.OTP_MAX_ATTEMPTS || '5', 10),
+    maxPerHour: parseInt(process.env.OTP_MAX_PER_HOUR || '8', 10),
+    hashSecret:
+      process.env.OTP_HASH_SECRET ||
+      process.env.JWT_SECRET ||
+      'dev_otp_hash_secret_change_me',
+  },
+
+  whatsapp: {
+    provider: (process.env.WHATSAPP_PROVIDER || 'auto').toLowerCase(),
+    fonnteToken: process.env.FONNTE_TOKEN || '',
+    cloudPhoneId: process.env.WHATSAPP_CLOUD_PHONE_ID || '',
+    cloudToken: process.env.WHATSAPP_CLOUD_TOKEN || '',
+    cloudTemplate: process.env.WHATSAPP_TEMPLATE_NAME || '',
+    cloudTemplateLang: process.env.WHATSAPP_TEMPLATE_LANG || 'id',
+    twilioAccountSid: process.env.TWILIO_ACCOUNT_SID || '',
+    twilioAuthToken: process.env.TWILIO_AUTH_TOKEN || '',
+    twilioFrom: process.env.TWILIO_WHATSAPP_FROM || '',
+  },
+
   maxUploadBytes: 50 * 1024 * 1024, // 50 MB per file
 };
 

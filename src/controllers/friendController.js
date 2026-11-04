@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import User from '../models/User.js';
 import { notifyUser } from '../socket/index.js';
+import { normalizePhone } from '../utils/phone.js';
 import { validationResult } from 'express-validator';
 
 /**
@@ -15,7 +16,7 @@ import { validationResult } from 'express-validator';
  *  - Each branch is guarded with `maxTimeMS`.
  */
 export async function searchUsers(req, res) {
-  const raw = (req.query.q || '').toString().trim();
+  const raw = (req.query.q || '').toString().trim().replace(/^@+/, '');
   if (!raw) {
     return res.status(400).json({ success: false, error: 'Masukkan kata kunci pencarian.' });
   }
@@ -23,10 +24,27 @@ export async function searchUsers(req, res) {
   const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const escaped = escapeRegex(raw);
   const lowerEscaped = escapeRegex(raw.toLowerCase());
+  const phone = normalizePhone(raw);
 
   try {
     const me = await User.findById(req.user._id);
     const select = 'name email customId avatar profilePic status isOnline lastSeen';
+
+    let byPhone = [];
+    if (phone) {
+      try {
+        byPhone = await User.find({
+          phone,
+          _id: { $ne: req.user._id },
+        })
+          .limit(1)
+          .maxTimeMS(5000)
+          .select(select)
+          .exec();
+      } catch (e) {
+        console.warn('[searchUsers] phone query failed, continuing:', e.message);
+      }
+    }
 
     // (1) Indexed prefix lookup on public ID (the common path for "add by ID").
     let byId = [];
@@ -46,13 +64,14 @@ export async function searchUsers(req, res) {
     // (2) Best-effort prefix search on name. A timeout here only drops the
     //     name matches — it never fails a request for a valid ID.
     let byName = [];
-    if (byId.length < 50) {
+    const found = byPhone.length + byId.length;
+    if (found < 50) {
       try {
         byName = await User.find({
           name: new RegExp(`^${escaped}`, 'i'),
           _id: { $ne: req.user._id },
         })
-          .limit(50 - byId.length)
+          .limit(50 - found)
           .maxTimeMS(5000)
           .select(select)
           .exec();
@@ -63,7 +82,7 @@ export async function searchUsers(req, res) {
 
     // Merge + dedupe (a user can match both the ID and name branches).
     const seen = new Set();
-    const users = [...byId, ...byName].filter((u) => {
+    const users = [...byPhone, ...byId, ...byName].filter((u) => {
       const key = u._id.toString();
       if (seen.has(key)) return false;
       seen.add(key);
@@ -105,17 +124,25 @@ function isValidObjectId(id) {
  *   - 200 : { success, user } with relationship annotated
  */
 export async function findUserByCustomId(req, res) {
-  const normalized = String(req.query.customId || '').trim().toLowerCase();
+  const input = String(req.query.customId || req.query.q || '')
+    .trim()
+    .replace(/^@+/, '');
+  const normalized = input.toLowerCase();
   if (!normalized) {
     return res.status(400).json({
       success: false,
       error: 'Masukkan ID Pengguna',
-      message: 'Masukkan ID Pengguna yang dicari.',
+      message: 'Masukkan ID atau username yang dicari.',
     });
   }
 
+  const phone = normalizePhone(input);
+  const lookup = phone
+    ? { $or: [{ customId: normalized }, { phone }] }
+    : { customId: normalized };
+
   try {
-    const user = await User.findOne({ customId: normalized })
+    const user = await User.findOne(lookup)
       .maxTimeMS(8000)
       .select('name email customId avatar profilePic status isOnline lastSeen');
     if (!user) {
@@ -173,7 +200,9 @@ export async function addFriend(req, res) {
   }
 
   const { customId } = req.body;
-  const normalized = String(customId).trim().toLowerCase();
+  const input = String(customId || '').trim().replace(/^@+/, '');
+  const normalized = input.toLowerCase();
+  const phone = normalizePhone(input);
 
   try {
     if (!normalized) {
@@ -183,9 +212,9 @@ export async function addFriend(req, res) {
       });
     }
 
-    const target = await User.findOne({ customId: normalized }).select(
-      'name email customId avatar profilePic status'
-    );
+    const target = await User.findOne(
+      phone ? { $or: [{ customId: normalized }, { phone }] } : { customId: normalized }
+    ).select('name email customId avatar profilePic status');
     if (!target) {
       return res.status(404).json({
         success: false,
