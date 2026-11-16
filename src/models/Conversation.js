@@ -60,10 +60,22 @@ conversationSchema.statics.pairKeyFor = function (userIdA, userIdB) {
  * Static helper: find-or-create a conversation between two users.
  */
 conversationSchema.statics.findOrCreate = async function (userIdA, userIdB) {
-  const pair = [String(userIdA), String(userIdB)].sort();
+  // De-duplicate so a self-chat is a single-participant conversation. Without
+  // this, `$all: [me, me]` matches ANY conversation that contains me (e.g. the
+  // chat with a friend), so messages to yourself landed in the wrong thread
+  // and no self-chat card ever appeared on the home screen.
+  const pair = [...new Set([String(userIdA), String(userIdB)])].sort();
   const pairKey = pair.join(':');
+  const isSelf = pair.length === 1;
 
-  let conv = await this.findOne({ participants: { $all: pair } });
+  let conv = await this.findOne({ pairKey });
+  if (!conv) {
+    conv = await this.findOne(
+      isSelf
+        ? { participants: { $all: pair, $size: 1 } }
+        : { participants: { $all: pair } }
+    );
+  }
   if (!conv) {
     try {
       conv = await this.create({ participants: pair, pairKey });

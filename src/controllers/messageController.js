@@ -185,8 +185,19 @@ export async function deleteConversation(req, res) {
 export async function markRead(req, res) {
   const { peerId } = req.params;
   try {
-    const pair = [req.user._id, peerId].sort();
-    const conv = await Conversation.findOne({ participants: { $all: pair } });
+    const pair = [...new Set([req.user._id.toString(), peerId])].sort();
+    const pairKey = pair.join(':');
+    // Look up by pairKey first: for a self-chat `$all: [me, me]` would match any
+    // conversation that contains me (e.g. a friend thread), zeroing the wrong
+    // unread count.
+    let conv = await Conversation.findOne({ pairKey });
+    if (!conv) {
+      conv = await Conversation.findOne(
+        pair.length === 1
+          ? { participants: { $all: pair, $size: 1 } }
+          : { participants: { $all: pair } }
+      );
+    }
     if (conv) {
       conv.unreadCounts.set(req.user._id.toString(), 0);
       await conv.save();
